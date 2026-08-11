@@ -44,8 +44,8 @@ if sys.platform == "win32":
 
 BASE_MATTERPORTDL_DIR = pathlib.Path(__file__).resolve().parent
 SCRIPT_NAME = os.path.basename(sys.argv[0])
-MAX_CONCURRENT_REQUESTS = 20  # cffi will make sure no more than this many curl workers are used at once
-MAX_CONCURRENT_TASKS = 64  # while we could theoretically leave this unbound just relying on MAX_CONCURRENT_REQESTS there is little reason to spawn a million tasks at once
+MAX_CONCURRENT_REQUESTS = 5  # lowered from 20 to avoid Matterport CDN 429 rate-limiting
+MAX_CONCURRENT_TASKS = 8  # lowered from 64 to avoid Matterport CDN 429 rate-limiting during mesh_tiles/tileset download
 
 BASE_MATTERPORT_DOMAIN = "matterport.com"
 CHINA_MATTERPORT_DOMAIN = "matterportvr.cn"
@@ -777,13 +777,16 @@ class ExceptionWhatExceptionTaskGroup(asyncio.TaskGroup):
             pass
 
 
-async def AsyncArrayDownload(assets: list[AsyncDownloadItem]):
+async def AsyncArrayDownload(assets: list[AsyncDownloadItem], throttle_delay: float = 0):
     async with ExceptionWhatExceptionTaskGroup() as tg:
         PROGRESS.RelativeMark()
 
         for asset in tqdm(assets):
             tg.create_task(downloadFile(asset.type, asset.shouldExist, asset.url, asset.file, key_type=asset.key_type))
-            await asyncio.sleep(0.001)  # we need some sleep or we will not yield
+            if throttle_delay > 0:
+                await asyncio.sleep(throttle_delay)
+            else:
+                await asyncio.sleep(0.001)
             while MAX_TASKS_SEMAPHORE.locked():
                 await asyncio.sleep(0.01)
         logging.debug(f"{PROGRESS}")
@@ -1368,7 +1371,7 @@ async def AdvancedAssetDownload(base_page_text: str):
             except Exception:
                 logging.exception("Adv download texture have exception")
         consoleLog("Downloading textures and previews for tileset 3d models")
-        await AsyncArrayDownload(toDownload)
+        await AsyncArrayDownload(toDownload, throttle_delay=0.15)
     except Exception:
         logging.exception("Adv download general had exception of")
         if CLA.getCommandLineArg(CommandLineArg.DEBUG):
