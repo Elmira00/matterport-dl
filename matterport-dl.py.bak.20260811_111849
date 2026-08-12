@@ -44,8 +44,8 @@ if sys.platform == "win32":
 
 BASE_MATTERPORTDL_DIR = pathlib.Path(__file__).resolve().parent
 SCRIPT_NAME = os.path.basename(sys.argv[0])
-MAX_CONCURRENT_REQUESTS = 5  # cffi will make sure no more than this many curl workers are used at once
-MAX_CONCURRENT_TASKS = 8  # while we could theoretically leave this unbound just relying on MAX_CONCURRENT_REQESTS there is little reason to spawn a million tasks at once
+MAX_CONCURRENT_REQUESTS = 5  # lowered from 20 to avoid Matterport CDN 429 rate-limiting
+MAX_CONCURRENT_TASKS = 8  # lowered from 64 to avoid Matterport CDN 429 rate-limiting during mesh_tiles/tileset download
 
 BASE_MATTERPORT_DOMAIN = "matterport.com"
 CHINA_MATTERPORT_DOMAIN = "matterportvr.cn"
@@ -176,17 +176,7 @@ def getVariants():
 async def downloadDAM(accessurl, uuid):
     # This should have already been downloaded during the ADV download
     damSrcFile = f"..{os.path.sep}{uuid}_50k.dam"
-    damTargetFile = f"..{os.path.sep}{uuid}_50k.dam"
-    for damAttempt in range(5):
-        try:
-            await downloadFile("UUID_DAM50K", True, accessurl.format(filename=f"{uuid}_50k.dam"), damTargetFile, key_type=AccessKeyType.FILES3_TEMPLATE_KEY)
-            break
-        except Exception as damErr:
-            if damAttempt == 4:
-                raise
-            waitSecs = 5 * (damAttempt + 1)
-            logging.warning(f"DAM50K download failed (attempt {damAttempt + 1}/5), likely rate limited, waiting {waitSecs}s: {damErr}")
-            await asyncio.sleep(waitSecs)
+    await downloadFile("UUID_DAM50K", True, accessurl.format(filename=f"{uuid}_50k.dam"), f"..{os.path.sep}{uuid}_50k.dam", key_type=AccessKeyType.FILES3_TEMPLATE_KEY)
     shutil.copy(damSrcFile, f"{uuid}_50k.dam")  # so the url here has the ~ in it but the primary dir is the parent sitl lwe will store it both places
     cur_file = ""
     try:
@@ -211,7 +201,7 @@ async def downloadSweeps(accessurl: str, sweeps: list[str]):
         sweep = sweep.replace("-", "")
         for variant in getVariants():  # so if we checked for 404s we could do this more effeciently but serializing it to do that would be slower than just a bunch of 404s
             toDownload.append(AsyncDownloadItem("MODEL_SWEEPS", True, accessurl.format(filename=f"tiles/{sweep}/{variant}") + "&imageopt=1", f"tiles/{sweep}/{variant}", key_type=forceKey))
-    await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+    await AsyncArrayDownload(toDownload)
 
 
 # these 3 downwload with json posts were old functions for old graphql queries we dont need/use ducrrently
@@ -668,7 +658,7 @@ async def downloadAssets(base, base_page_text):
             local_file = local_file + "index.html"
         shouldExist = True
         toDownload.append(AsyncDownloadItem(type, shouldExist, f"{base}{asset}", local_file))
-    await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+    await AsyncArrayDownload(toDownload)
     if react_vendor_filename and os.path.exists(react_vendor_filename):
         reactCont = ""
         with open(react_vendor_filename, "r", encoding="UTF-8") as f:
@@ -758,7 +748,7 @@ async def downloadWebglVendors(base_page_text):
     for script in webglVendors:
         url = f"{threeBase}/{script}"
         toDownload.append(AsyncDownloadItem("WEBGL_FILE", False, url, urlparse(url).path[1:]))
-    await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+    await AsyncArrayDownload(toDownload)
 
 
 class AsyncDownloadItem:
@@ -812,7 +802,7 @@ async def downloadFixedAPIInfo(pageid):
         if local_file.endswith("/"):
             local_file = local_file + "index.html"
         toDownload.append(AsyncDownloadItem("MODEL_INFO", True, f"https://my.{BASE_MATTERPORT_DOMAIN}/{asset}", local_file))
-    await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+    await AsyncArrayDownload(toDownload)
 
 
 async def downloadInfo(pageid):
@@ -854,7 +844,7 @@ async def downloadAttachments():
             if "fileAttachments" in mattertag:
                 for attachment in mattertag["fileAttachments"]:
                     toDownload.append(AsyncDownloadItem("MODEL_ATTACHMENTS", True, attachment["url"], urlparse(attachment["url"]).path[1:], key_type=AccessKeyType.LeaveKeyAlone))
-        await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+        await AsyncArrayDownload(toDownload)
 
     except Exception:
         logging.exception("Unable to open graph model for prefetch output and download the embedded attachments...")
@@ -868,7 +858,7 @@ async def downloadPics(pageid):
     toDownload: list[AsyncDownloadItem] = []
     for image in modeldata["images"]:
         toDownload.append(AsyncDownloadItem("MODEL_IMAGES", True, image["src"], urlparse(image["src"]).path[1:]))  # want want to use signed_src or download_url?
-    await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+    await AsyncArrayDownload(toDownload)
 
 
 async def downloadMainAssets(pageid, accessurl):
@@ -1322,7 +1312,6 @@ async def AdvancedAssetDownload(base_page_text: str):
                     url = tilesetUrlTemplate.replace("<file>", uri)
                     try:
                         chunkBytes = await downloadFileAndGetText("ADV_TILESET_GLB", False, url, urlparse(url).path[1:], isBinary=True, key_type=AccessKeyType.LeaveKeyAlone)
-                        await asyncio.sleep(0.15)
                         chunkText = chunkBytes.decode("utf-8", "ignore")
                         chunks = re.findall(r"(lod[0-9]_[a-zA-Z0-9-_]+\.(jpg|ktx2))", chunkText)
                         # print("Found chunks: ",chunks)
@@ -1382,7 +1371,7 @@ async def AdvancedAssetDownload(base_page_text: str):
             except Exception:
                 logging.exception("Adv download texture have exception")
         consoleLog("Downloading textures and previews for tileset 3d models")
-        await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+        await AsyncArrayDownload(toDownload, throttle_delay=0.15)
     except Exception:
         logging.exception("Adv download general had exception of")
         if CLA.getCommandLineArg(CommandLineArg.DEBUG):
@@ -1731,7 +1720,7 @@ class KeyHandler:
             debugTargetName = os.path.join("debug", os.path.basename(urlparse(url).path[1:]))
             for key in KeyHandler.KNOWN_ACCESS_KEYS:
                 toDownload.append(AsyncDownloadItem("FindUrlKey", False, KeyHandler.SetAccessKeyForUrl(url, key), os.path.join(tmp, "test_" + key), key_type=AccessKeyType.LeaveKeyAlone))
-            await AsyncArrayDownload(toDownload, throttle_delay=0.03)
+            await AsyncArrayDownload(toDownload)
             for _file in os.listdir(tmp):
                 if not _file.startswith("test_"):
                     continue
